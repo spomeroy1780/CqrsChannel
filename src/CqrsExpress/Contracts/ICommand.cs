@@ -1,4 +1,4 @@
-namespace CqrsCompiledExpress.Contracts;
+namespace CqrsExpress.Contracts;
 
 public interface ICommand
 {

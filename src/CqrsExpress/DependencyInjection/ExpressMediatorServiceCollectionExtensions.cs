@@ -1,30 +1,29 @@
 using System.Reflection;
-using CqrsCompiledExpress.Mediator;
-using CqrsCompiledExpress.Contracts;
+using CqrsExpress.Core;
+using CqrsExpress.Contracts;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Hosting;
 
-namespace CqrsCompiledExpress.DependencyInjection;
+namespace CqrsExpress.DependencyInjection;
 
-public static class CompiledExpressMediatorServiceCollectionExtensions
+public static class ExpressMediatorServiceCollectionExtensions
 {
     /// <summary>
-    /// Basic registration - just adds the CompiledExpressMediator singleton
+    /// Basic registration - just adds the ExpressMediator singleton
     /// </summary>
-    public static IServiceCollection AddCompiledExpressMediator(this IServiceCollection services)
+    public static IServiceCollection AddExpressMediator(this IServiceCollection services)
     {
-        services.AddSingleton<CompiledExpressMediator>();
+        services.AddSingleton<ExpressMediator>();
         return services;
     }
-
+    
     /// <summary>
-    /// All-in-one method: Registers CompiledExpressMediator + auto-discovers and registers all handlers from specified assemblies
+    /// High-performance registration with pre-compilation of handlers at startup
+    /// Eliminates first-request overhead by pre-compiling expression trees
     /// </summary>
-    /// <param name="services">The service collection</param>
-    /// <param name="assemblies">Assemblies to scan for handlers (defaults to calling assembly)</param>
-    /// <returns>Service collection for chaining</returns>
-    public static IServiceCollection AddCompiledExpressMediatorWithHandlers(
+    public static IServiceCollection AddExpressMediatorWithPreCompilation(
         this IServiceCollection services, 
         params Assembly[] assemblies)
     {
@@ -35,7 +34,39 @@ public static class CompiledExpressMediatorServiceCollectionExtensions
         }
 
         // Register the mediator
-        services.AddSingleton<CompiledExpressMediator>();
+        services.AddSingleton<ExpressMediator>();
+
+        // Auto-discover and register all handlers
+        foreach (var assembly in assemblies)
+        {
+            RegisterHandlersFromAssembly(services, assembly);
+        }
+
+        // Register hosted service for pre-compilation at startup
+        services.AddHostedService<ExpressMediatorPreCompilationService>(provider => 
+            new ExpressMediatorPreCompilationService(assemblies));
+
+        return services;
+    }
+
+    /// <summary>
+    /// All-in-one method: Registers ExpressMediator + auto-discovers and registers all handlers from specified assemblies
+    /// </summary>
+    /// <param name="services">The service collection</param>
+    /// <param name="assemblies">Assemblies to scan for handlers (defaults to calling assembly)</param>
+    /// <returns>Service collection for chaining</returns>
+    public static IServiceCollection AddExpressMediatorWithHandlers(
+        this IServiceCollection services, 
+        params Assembly[] assemblies)
+    {
+        // Default to calling assembly if none specified
+        if (assemblies.Length == 0)
+        {
+            assemblies = new[] { Assembly.GetCallingAssembly() };
+        }
+
+        // Register the mediator
+        services.AddSingleton<ExpressMediator>();
 
         // Auto-discover and register all handlers
         foreach (var assembly in assemblies)
@@ -44,7 +75,7 @@ public static class CompiledExpressMediatorServiceCollectionExtensions
         }
 
         // Register the startup filter for handler compilation
-        services.TryAddEnumerable(ServiceDescriptor.Transient<IStartupFilter, CompiledExpressMediatorStartupFilter>());
+        services.TryAddEnumerable(ServiceDescriptor.Transient<IStartupFilter, ExpressMediatorStartupFilter>());
 
         return services;
     }
@@ -52,7 +83,7 @@ public static class CompiledExpressMediatorServiceCollectionExtensions
     /// <summary>
     /// Ultimate convenience method - scans current assembly + referenced assemblies
     /// </summary>
-    public static IServiceCollection AddCompiledExpressMediatorWithAutoDiscovery(this IServiceCollection services)
+    public static IServiceCollection AddExpressMediatorWithAutoDiscovery(this IServiceCollection services)
     {
         var callingAssembly = Assembly.GetCallingAssembly();
         var assemblies = new List<Assembly> { callingAssembly };
@@ -64,7 +95,7 @@ public static class CompiledExpressMediatorServiceCollectionExtensions
                           !name.Name.StartsWith("netstandard"))
             .Select(Assembly.Load));
 
-        return AddCompiledExpressMediatorWithHandlers(services, assemblies.ToArray());
+        return AddExpressMediatorWithHandlers(services, assemblies.ToArray());
     }
 
     private static void RegisterHandlersFromAssembly(IServiceCollection services, Assembly assembly)

@@ -1,10 +1,9 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.DependencyInjection;
 
-namespace CqrsCompiledExpress.DependencyInjection;
+namespace CqrsExpress.DependencyInjection;
 
-internal sealed class CompiledExpressMediatorStartupFilter : IStartupFilter
+internal sealed class ExpressMediatorStartupFilter : IStartupFilter
 {
     public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
     {

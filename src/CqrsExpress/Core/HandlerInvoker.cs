@@ -1,7 +1,7 @@
 using System.Linq.Expressions;
-using CqrsCompiledExpress.Contracts;
+using CqrsExpress.Contracts;
 
-namespace CqrsCompiledExpress.Core;
+namespace CqrsExpress.Core;
 
 /// <summary>
 /// Compiles strongly-typed handler delegates for CQRS handlers,
@@ -55,7 +55,6 @@ internal sealed class HandlerInvoker
         var handlerCast = Expression.Convert(handlerParam, typeof(THandler));
         var requestCast = Expression.Convert(requestParam, typeof(TQuery));
 
-        // handler.HandleAsync((TQuery)req, ct)
         var call = Expression.Call(handlerCast,
             typeof(THandler).GetMethod(nameof(IQueryHandler<TQuery, TResult>.Handle))!,
             requestCast, ctParam);
@@ -84,7 +83,7 @@ internal sealed class HandlerInvoker
         var requestCast = Expression.Convert(requestParam, typeof(TCommand));
 
         var call = Expression.Call(handlerCast,
-            typeof(THandler).GetMethod(nameof(ICommandHandler<TCommand>.HandleAsync))!,
+            typeof(THandler).GetMethod(nameof(ICommandHandler<TCommand>.Handle))!,
             requestCast, ctParam);
 
         // no result, just return default
@@ -92,7 +91,6 @@ internal sealed class HandlerInvoker
             call,
             Expression.Constant(new ValueTask<object?>((object?)null))
         );
-
         return Expression.Lambda<Func<object, object, CancellationToken, ValueTask<object?>>>(
             body, handlerParam, requestParam, ctParam).Compile();
     }
@@ -110,7 +108,7 @@ internal sealed class HandlerInvoker
         var requestCast = Expression.Convert(requestParam, typeof(TCommand));
 
         var call = Expression.Call(handlerCast,
-            typeof(THandler).GetMethod(nameof(ICommandHandler<TCommand, TResult>.HandleAsync))!,
+            typeof(THandler).GetMethod(nameof(ICommandHandler<TCommand, TResult>.Handle))!,
             requestCast, ctParam);
 
         // Wrap into CastValueTask

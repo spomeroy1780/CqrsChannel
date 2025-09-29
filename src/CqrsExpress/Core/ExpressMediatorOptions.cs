@@ -1,8 +1,7 @@
-using CqrsCompiledExpress.Pipeline;
+using CqrsExpress.Pipeline;
+namespace CqrsExpress.Core;
 
-namespace CqrsCompiledExpress.Core;
-
-public sealed class CompiledExpressMediatorOptions
+public sealed class ExpressMediatorOptions
 {
     internal readonly List<Type> GlobalPipelines = new();
     internal readonly Dictionary<Type, List<Type>> PerTypePipelines = new();

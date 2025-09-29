@@ -1,4 +1,4 @@
-namespace CqrsCompiledExpress.Core;
+namespace CqrsExpress.Core;
 
 internal readonly struct RequestEnvelope
 {

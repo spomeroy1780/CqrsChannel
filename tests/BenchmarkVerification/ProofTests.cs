@@ -6,7 +6,7 @@ namespace BenchmarkVerification;
 public class ProofTests
 {
     [Fact]
-    public void CompiledExpress_ShouldBeFaster_Than_Mediatr()
+    public async Task Express_ShouldBeFaster_Than_Mediatr()
     {
         // Create instances of the benchmarks
         var benchmarks = new CqrsBenchmarks.Benchmarks();
@@ -16,7 +16,7 @@ public class ProofTests
         var stopwatch = Stopwatch.StartNew();
         for (int i = 0; i < 10000; i++)
         {
-            benchmarks.ChannelsDirectSync();
+            await benchmarks.CqrsExpressDirect();
         }
         stopwatch.Stop();
         var compiledExpressTime = stopwatch.Elapsed.TotalNanoseconds / 10000;
@@ -25,7 +25,7 @@ public class ProofTests
         stopwatch.Restart();
         for (int i = 0; i < 10000; i++)
         {
-            benchmarks.Mediatr().GetAwaiter().GetResult();
+            await benchmarks.Mediatr();
         }
         stopwatch.Stop();
         var mediatrTime = stopwatch.Elapsed.TotalNanoseconds / 10000;

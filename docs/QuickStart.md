@@ -1,14 +1,14 @@
-# CqrsCompiledExpress Quick Start
+# CqrsExpress Quick Start
 
 ## All-in-One Setup Options
 
 ### Option 1: Auto-Discovery (Easiest - One Line!)
 ```csharp
 // In Program.cs or Startup.cs
-services.AddCompiledExpressMediatorWithAutoDiscovery();
+services.AddExpressMediatorWithAutoDiscovery();
 ```
 **What it does:**
-- Registers CompiledExpressMediator singleton
+- Registers ExpressMediator singleton
 - Automatically discovers all handlers in your assembly + referenced assemblies
 - Registers startup filter for handler compilation
 - Zero configuration required!
@@ -16,7 +16,7 @@ services.AddCompiledExpressMediatorWithAutoDiscovery();
 ### Option 2: Specify Assemblies
 ```csharp
 // In Program.cs or Startup.cs
-services.AddCompiledExpressMediatorWithHandlers(
+services.AddExpressMediatorWithHandlers(
     typeof(Program).Assembly,           // Current assembly
     typeof(MyHandlers).Assembly        // Specific assembly
 );
@@ -25,7 +25,7 @@ services.AddCompiledExpressMediatorWithHandlers(
 ### Option 3: Basic Registration (Manual Handler Registration)
 ```csharp
 // In Program.cs or Startup.cs
-services.AddCompiledExpressMediator();
+services.AddExpressMediator();
 
 // Then manually register your handlers
 services.AddTransient<IQueryHandler<GetUserQuery, UserDto>, GetUserHandler>();
@@ -37,9 +37,9 @@ services.AddTransient<ICommandHandler<CreateUserCommand>, CreateUserHandler>();
 ```csharp
 public class UserController : ControllerBase
 {
-    private readonly CompiledExpressMediator _mediator;
+    private readonly ExpressMediator _mediator;
 
-    public UserController(CompiledExpressMediator mediator)
+    public UserController(ExpressMediator mediator)
     {
         _mediator = mediator;
     }
@@ -61,7 +61,7 @@ public class UserController : ControllerBase
 
 ## Underlying Architecture Foundation
 
-**CqrsCompiledExpress uses compiled expression trees for direct handler execution.**
+**CqrsExpress uses compiled expression trees for direct handler execution.**
 
 ### What It Actually Uses:
 1. **Direct Service Resolution** - Uses `IServiceProvider.GetService<T>()` for handler lookup
@@ -107,4 +107,4 @@ dotnet run -c Release all
 **Note:** The "Failed to set up high priority" warning is cosmetic and doesn't affect benchmark accuracy. For maximum precision, run with `sudo dotnet run -c Release load`.
 
 ## Recommended Approach
-**Use `AddCompiledExpressMediatorWithAutoDiscovery()` for maximum convenience** - it handles everything automatically!
+**Use `AddExpressMediatorWithAutoDiscovery()` for maximum convenience** - it handles everything automatically!

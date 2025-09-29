@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
-    <ProjectReference Include="../../src/CqrsCompiledExpress/CqrsCompiledExpress.csproj" />
+    <ProjectReference Include="../../src/CqrsExpress/CqrsExpress.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.15.3" />

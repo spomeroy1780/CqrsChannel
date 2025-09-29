@@ -1,4 +1,4 @@
-namespace CqrsCompiledExpress.Pipeline;
+namespace CqrsExpress.Pipeline;
 
 public interface IRequestPipeline
 {

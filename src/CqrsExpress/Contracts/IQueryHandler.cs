@@ -1,6 +1,4 @@
-using CqrsCompiledExpress.Contracts;
-
-namespace CqrsCompiledExpress.Contracts;
+namespace CqrsExpress.Contracts;
 
 public interface IQueryHandler<TQuery, TResult>
     where TQuery : IQuery<TResult>
