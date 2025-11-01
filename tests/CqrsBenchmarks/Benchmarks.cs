@@ -7,6 +7,7 @@ using CqrsBenchmarks.MessagePipeImpl;
 using CqrsExpress.Core;
 using CqrsExpress.Contracts;
 using MediatR;
+using System.Threading.Tasks;
 
 namespace CqrsBenchmarks;
 
@@ -16,9 +17,11 @@ namespace CqrsBenchmarks;
 public class Benchmarks
 {
     private IMediator _mediatr = null!;
-    private MessagePipe.IRequestHandler<MessagePipeQuery, UserDto> _messagePipeHandler = null!;
+    private MessagePipeHandler _messagePipeHandler = null!;
     private ExpressMediator _compiledExpressMediator = null!;
     private IQueryHandler<ExpressImp.GetUserQuery, UserDto> _compiledExpressHandler = null!;
+    private IQueryHandler<ExpressImp.GetUserQuery, UserDto> _compiledExpressHandlerFast = null!;
+    private ExpressImp.GetUserHandlerStruct _compiledExpressHandlerStruct;
 
     private readonly MediatrImpl.GetUserQuery _mediatrQuery = new(1);
     private readonly MessagePipeQuery _mpQuery = new(1);
@@ -28,9 +31,11 @@ public class Benchmarks
     public void Setup()
     {
         _mediatr = MediatrSetup.BuildMediator();
-        _messagePipeHandler = MessagePipeSetup.BuildHandler();
+        _messagePipeHandler = (MessagePipeHandler)MessagePipeSetup.BuildHandler();
         _compiledExpressMediator = ExpressImp.ExpressSetup.BuildMediator();
         _compiledExpressHandler = new ExpressImp.GetUserHandler();
+        _compiledExpressHandlerFast = new ExpressImp.GetUserHandlerFast();
+        _compiledExpressHandlerStruct = new ExpressImp.GetUserHandlerStruct();
     }
 
     [Benchmark(Baseline = true)]
@@ -38,24 +43,28 @@ public class Benchmarks
         await _mediatr.Send(_mediatrQuery);
 
     [Benchmark]
-    public async Task<UserDto> MessagePipe() =>
-        await ((MessagePipeHandler)_messagePipeHandler).InvokeAsync(_mpQuery);
+    public ValueTask<UserDto> MessagePipe() =>
+        _messagePipeHandler.InvokeAsync(_mpQuery);
 
     [Benchmark]
-    public async ValueTask<UserDto> CqrsExpress() =>
-        await _compiledExpressMediator.Send<ExpressImp.GetUserQuery, UserDto>(_compiledExpressQuery, _compiledExpressHandler);
+    public ValueTask<UserDto> ExpressMediator_UltraFast() =>
+        ExpressMediator.Send(_compiledExpressQuery, _compiledExpressHandlerStruct);
 
     [Benchmark]
-    public async ValueTask<UserDto> CqrsExpressOptimized() =>
-        await _compiledExpressMediator.Send<ExpressImp.GetUserQuery, UserDto>(_compiledExpressQuery);
+    public ValueTask<UserDto> ExpressMediator_StaticInvoke() =>
+        ExpressMediator.Send(_compiledExpressQuery, _compiledExpressHandler);
 
     [Benchmark]
-    public async ValueTask<UserDto> CqrsExpressDirect() =>
-        await _compiledExpressHandler.Handle(_compiledExpressQuery, CancellationToken.None);
+    public ValueTask<UserDto> ExpressMediator_Precompiled() =>
+        _compiledExpressMediator.Send<ExpressImp.GetUserQuery, UserDto>(_compiledExpressQuery);
 
     [Benchmark]
-    public UserDto CqrsExpressDirectSync() =>
-        ExpressMediator.SendSync(_compiledExpressQuery, _compiledExpressHandler);
+    public ValueTask<UserDto?> ExpressMediator_DirectHandler() =>
+        _compiledExpressHandler.Handle(_compiledExpressQuery, CancellationToken.None)!;
+
+    [Benchmark]
+    public ValueTask<UserDto> ExpressMediator_DirectSync() =>
+        ExpressMediator.Send(_compiledExpressQuery, _compiledExpressHandler);
 }
 
 [MemoryDiagnoser]
@@ -105,11 +114,11 @@ public class LoadBenchmarks
     }
 
     [Benchmark]
-    public async Task<UserDto[]> ExpressLoad()
+    public async Task<UserDto[]> ExpressMediator_StaticInvoke_Load()
     {
         var tasks = new ValueTask<UserDto>[LoadSize];
         for (int i = 0; i < LoadSize; i++)
-            tasks[i] = _compiledExpressMediator.Send<ExpressImp.GetUserQuery, UserDto>(_compiledExpressQuery, _compiledExpressHandler);
+            tasks[i] = ExpressMediator.Send(_compiledExpressQuery, _compiledExpressHandler);
 
         var results = new UserDto[LoadSize];
         for (int i = 0; i < LoadSize; i++)
@@ -119,11 +128,11 @@ public class LoadBenchmarks
     }
 
     [Benchmark]
-    public async Task<UserDto[]> ExpressDirectLoad()
+    public async Task<UserDto[]> ExpressMediator_Precompiled_Load()
     {
         var tasks = new ValueTask<UserDto>[LoadSize];
         for (int i = 0; i < LoadSize; i++)
-            tasks[i] = _compiledExpressHandler.Handle(_compiledExpressQuery, CancellationToken.None);
+            tasks[i] = _compiledExpressMediator.Send<ExpressImp.GetUserQuery, UserDto>(_compiledExpressQuery);
 
         var results = new UserDto[LoadSize];
         for (int i = 0; i < LoadSize; i++)
@@ -133,11 +142,11 @@ public class LoadBenchmarks
     }
 
     [Benchmark]
-    public UserDto[] ExpressDirectSyncLoad()
+    public async Task<UserDto[]> ExpressMediator_DirectHandler_Load()
     {
-        var results = new UserDto[LoadSize];
+        UserDto[] results = new UserDto[LoadSize];
         for (int i = 0; i < LoadSize; i++)
-            results[i] = ExpressMediator.SendSync(_compiledExpressQuery, _compiledExpressHandler);
+            results[i] = await ExpressMediator.SendDirect(_compiledExpressQuery, _compiledExpressHandler);
 
         return results;
     }

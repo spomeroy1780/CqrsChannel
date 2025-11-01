@@ -16,7 +16,7 @@ public class ProofTests
         var stopwatch = Stopwatch.StartNew();
         for (int i = 0; i < 10000; i++)
         {
-            await benchmarks.CqrsExpressDirect();
+            await benchmarks.ExpressMediator_UltraFast();
         }
         stopwatch.Stop();
         var compiledExpressTime = stopwatch.Elapsed.TotalNanoseconds / 10000;

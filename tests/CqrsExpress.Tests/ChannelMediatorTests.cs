@@ -24,7 +24,7 @@ public class ExpressMediatorTests
     {
         var command = new TestCommand();
         var handler = new TestCommandHandler();
-        await _mediator.Send(command, handler, CancellationToken.None);
+        await ExpressMediator.Send(command, handler, CancellationToken.None);
         Assert.True(handler.WasCalled);
     }
 
@@ -33,7 +33,7 @@ public class ExpressMediatorTests
     {
         var query = new TestQuery();
         var handler = new TestQueryHandler();
-        var result = await _mediator.Send<TestQuery, string>(query, handler, CancellationToken.None);
+        var result = await ExpressMediator.Send(query, handler, CancellationToken.None);
         Assert.Equal("TestResult", result);
         Assert.True(handler.WasCalled);
     }

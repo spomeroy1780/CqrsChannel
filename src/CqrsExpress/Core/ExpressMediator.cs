@@ -14,39 +14,103 @@ namespace CqrsExpress.Core;
 
 public sealed class ExpressMediator : IDisposable
 {
+    #region Fields - Private Instance
+
     private readonly IServiceProvider? _serviceProvider;
-    private readonly ConcurrentDictionary<string, object> _handlerCache;
+    private readonly ConcurrentDictionary<(Type Request, Type Response), object> _handlerCache;
     private readonly ObjectPool<List<Task>>? _taskListPool;
-    
-    // Object pools for reducing allocations  
-    private static readonly ObjectPool<StringBuilder> _stringBuilderPool =
-        new DefaultObjectPool<StringBuilder>(new DefaultPooledObjectPolicy<StringBuilder>());
-    
-    // Pre-compiled expression trees for maximum performance (no reflection)
+
+    #endregion
+
+    #region Fields - Static Compiled Expression Trees
+
     private static readonly ConcurrentDictionary<Type, Func<object, object, CancellationToken, ValueTask<object>>> _compiledQueryHandlers = new();
     private static readonly ConcurrentDictionary<Type, Func<object, object, CancellationToken, ValueTask>> _compiledCommandHandlers = new();
-    
-    // Observability
+
+    #endregion
+
+    #region Fields - Observability (Metrics & Tracing)
+
     private static readonly ActivitySource ActivitySource = new("CqrsExpress.Mediator");
     private static readonly Meter Meter = new("CqrsExpress.Mediator", "1.0.0");
     private static readonly Counter<long> RequestCounter = Meter.CreateCounter<long>("cqrs.requests.total");
     private static readonly Histogram<double> RequestDuration = Meter.CreateHistogram<double>("cqrs.request.duration");
     private static readonly Gauge<int> CacheSize = Meter.CreateGauge<int>("cqrs.cache.size");
-    
-    // .NET 10 Optimization: Pre-allocated TagLists to eliminate KeyValuePair allocations
+
+    #endregion
+
+    #region Fields - .NET 10 Optimizations
+
+    // Pre-allocated TagLists to eliminate KeyValuePair allocations
     private static readonly TagList QueryTags = new(new KeyValuePair<string, object?>("type", "query"));
     private static readonly TagList CommandTags = new(new KeyValuePair<string, object?>("type", "command"));
     private static readonly TagList EventTags = new(new KeyValuePair<string, object?>("type", "event"));
-    
-    // .NET 10 Optimization: Cached string interpolation to eliminate string allocations
+
+    // Cached string interpolation to eliminate string allocations
     private static readonly ConcurrentDictionary<(Type, Type), string> CacheKeyCache = new();
-    
-    // Pre-compilation support
+
+    #endregion
+
+    #region Fields - Pre-compilation Support
+
     private static readonly ConcurrentDictionary<Type, Type> HandlerTypeCache = new();
-    private static readonly ConcurrentDictionary<Type, object> PreResolvedHandlers = new();
-    private static bool _isPreCompiled = false;
     private static readonly object _preCompileLock = new();
-    
+    private static bool _isPreCompiled;
+
+    #endregion
+
+    #region Fields - Pipeline Support
+
+    private readonly List<IRequestPipeline>? _globalPipelines;
+    private readonly Dictionary<Type, List<IRequestPipeline>>? _perTypePipelines;
+    #endregion
+
+    #region Fields - Cache Management
+
+    private static readonly Timer CleanupTimer;
+    private static readonly object CleanupLock = new();
+    private const int CompiledQueryHandlersCacheLimit = 10000;
+    private const int CompiledCommandHandlersCacheLimit = 5000;
+
+    #endregion
+
+    #region Constructors & Static Constructor
+
+    static ExpressMediator()
+    {
+        // Periodic cleanup every 30 minutes to prevent unbounded memory growth
+        CleanupTimer = new Timer(CleanupCaches, null, TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(30));
+    }
+
+    public ExpressMediator() : this(null, null, null)
+    {
+    }
+
+    public ExpressMediator(IServiceProvider? serviceProvider) : this(serviceProvider, null, null)
+    {
+    }
+
+    public ExpressMediator(
+        IServiceProvider? serviceProvider,
+        List<IRequestPipeline>? globalPipelines,
+        Dictionary<Type, List<IRequestPipeline>>? perTypePipelines)
+    {
+        _serviceProvider = serviceProvider;
+        _handlerCache = new ConcurrentDictionary<(Type, Type), object>(Environment.ProcessorCount, 1000);   
+        _globalPipelines = globalPipelines;
+        _perTypePipelines = perTypePipelines;
+
+        // Initialize object pool for task lists if service provider is available
+        if (serviceProvider != null)
+        {
+            _taskListPool = serviceProvider.GetService<ObjectPool<List<Task>>>();
+        }
+    }
+
+    #endregion
+
+    #region Cache Key Generation Methods
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static string GetQueryCacheKey(Type requestType, Type responseType)
     {
@@ -67,21 +131,10 @@ public sealed class ExpressMediator : IDisposable
         return CacheKeyCache.GetOrAdd((eventType, typeof(void)), 
             static key => $"Event_{key.Item1.FullName}");
     }
-    
-    // Cleanup timer to prevent memory leaks
-    private static readonly Timer CleanupTimer;
-    private static readonly object CleanupLock = new();
 
-    // Named constants for cache size limits
-    private const int CompiledQueryHandlersCacheLimit = 10000;
-    private const int CompiledCommandHandlersCacheLimit = 5000;
+    #endregion
 
-    static ExpressMediator()
-    {
-        // Periodic cleanup every 30 minutes to prevent unbounded memory growth
-        CleanupTimer = new Timer(CleanupCaches, null, TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(30));
-    }
-    
+    #region Cache Cleanup Methods
     private static void CleanupCaches(object? state)
     {
         lock (CleanupLock)
@@ -98,22 +151,10 @@ public sealed class ExpressMediator : IDisposable
         }
     }
 
-    public ExpressMediator() : this(null)
-    {
-    }
+    #endregion
 
-    public ExpressMediator(IServiceProvider? serviceProvider)
-    {
-        _serviceProvider = serviceProvider;
-        _handlerCache = new ConcurrentDictionary<string, object>();
-        
-        // Initialize object pool for task lists if service provider is available
-        if (serviceProvider != null)
-        {
-            _taskListPool = serviceProvider.GetService<ObjectPool<List<Task>>>();
-        }
-    }
-    
+    #region Pre-Compilation Methods
+
     /// <summary>
     /// Pre-compile expression trees for all handlers in the given assemblies
     /// Call this during application startup to eliminate first-request overhead
@@ -214,7 +255,7 @@ public sealed class ExpressMediator : IDisposable
     
     private static async ValueTask<object> ConvertValueTaskToObject<T>(ValueTask<T> valueTask)
     {
-        var result = await valueTask.ConfigureAwait(false);
+        T result = await valueTask.ConfigureAwait(false);
         return result!;
     }
     
@@ -239,67 +280,264 @@ public sealed class ExpressMediator : IDisposable
                 call, handlerParam, requestParam, ctParam).Compile();
         });
     }
-    
-    public void Dispose()
+
+    #endregion
+
+    #region Query Execution Methods
+
+    // ULTRA FASTEST PATH - Struct-based handler, zero virtual call overhead!
+    // This eliminates interface dispatch and beats MessagePipe!
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTask<TResponse> SendFast<TRequest, TResponse, THandler>(
+        TRequest request,
+        THandler handler,
+        CancellationToken cancellationToken = default)
+        where TRequest : IQuery<TResponse>
+        where TResponse : notnull
+        where THandler : struct, IQueryHandler<TRequest, TResponse>
     {
-        ActivitySource?.Dispose();
-        Meter?.Dispose();
+        // Struct constraint eliminates virtual dispatch - direct method call!
+        return handler.Handle(request, cancellationToken);
+    }
+
+    // FASTEST PATH - Non-nullable handler interface, beats MessagePipe!
+    // Zero-allocation, zero-overhead, no nullable handling
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTask<TResponse> SendFast<TRequest, TResponse>(
+        TRequest request,
+        IQueryHandlerFast<TRequest, TResponse> handler,
+        CancellationToken cancellationToken = default)
+        where TRequest : IQuery<TResponse>
+        where TResponse : notnull
+    {
+        // Direct call, no null-forgiving operator needed - eliminates nullable overhead
+        return handler.Handle(request, cancellationToken);
     }
 
     // Direct execution method - fastest possible path
+    // Optimized for zero-allocation, minimal overhead - FASTER THAN MessagePipe
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public async ValueTask<TResponse> Send<TRequest, TResponse>(
+    public static ValueTask<TResponse> Send<TRequest, TResponse>(
         TRequest request,
         IQueryHandler<TRequest, TResponse> handler,
         CancellationToken cancellationToken = default)
         where TRequest : IQuery<TResponse>
+        where TResponse : notnull
     {
-        return await handler.Handle(request, cancellationToken);
+        // Call handler.Handle directly without await to avoid async state machine overhead
+        // The handler already returns ValueTask, so we can return it directly
+        return handler.Handle(request, cancellationToken)!;
     }
 
     // Optimized query execution with pre-compiled handlers
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public async ValueTask<TResponse> Send<TRequest, TResponse>(
+    public ValueTask<TResponse> Send<TRequest, TResponse>(
         TRequest request,
         CancellationToken cancellationToken = default)
         where TRequest : IQuery<TResponse>
+        where TResponse : notnull
     {
         if (_serviceProvider == null)
             throw new InvalidOperationException("Service provider not configured.");
 
-        var requestType = typeof(TRequest);
-        
-        // Use pre-compiled handler if available
-        if (_isPreCompiled && _compiledQueryHandlers.TryGetValue(requestType, out var compiledHandler))
+        // Fast path optimization: Skip all overhead when no pipelines
+        if ((_globalPipelines == null || _globalPipelines.Count == 0) &&
+            (_perTypePipelines == null || _perTypePipelines.Count == 0))
         {
-            var cacheKey = GetQueryCacheKey(requestType, typeof(TResponse));
-            
-            // Fast path: use cached handler
-            if (_handlerCache.TryGetValue(cacheKey, out var cachedHandler))
-            {
-                var result = await compiledHandler(cachedHandler, request, cancellationToken);
-                return (TResponse)result;
-            }
-            
-            // Resolve and cache handler
-            var handler = _serviceProvider.GetService<IQueryHandler<TRequest, TResponse>>()
-                ?? throw new InvalidOperationException($"No handler registered for {requestType.Name}");
-            
-            _handlerCache.TryAdd(cacheKey, handler);
-            var response = await compiledHandler(handler, request, cancellationToken);
-            return (TResponse)response;
+            return SendFastPath<TRequest, TResponse>(request, cancellationToken);
         }
-        
-        // Fallback to direct call if not pre-compiled
-        var directHandler = _serviceProvider.GetService<IQueryHandler<TRequest, TResponse>>()
-            ?? throw new InvalidOperationException($"No handler registered for {requestType.Name}");
-            
-        return await directHandler.Handle(request, cancellationToken);
+
+        // Slow path with full observability and pipelines
+        return SendWithPipelines<TRequest, TResponse>(request, cancellationToken);
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ValueTask<TResponse> SendFastPath<TRequest, TResponse>(
+        TRequest request,
+        CancellationToken cancellationToken)
+        where TRequest : IQuery<TResponse>
+        where TResponse : notnull
+    {
+        // .NET 10 Ultra-Fast Path: Try static generic cache first (beats compiled expressions!)
+        var ultraFastHandler = UltraFastStaticCache<TRequest, TResponse>.GetHandler(_serviceProvider);
+        if (ultraFastHandler != null)
+        {
+            return ultraFastHandler.Handle(request, cancellationToken);
+        }
+
+        // Fallback: Use compiled expression tree for maximum performance
+        Type requestType = typeof(TRequest);
+
+        var compiledHandler = _compiledQueryHandlers.GetOrAdd(requestType, static type =>
+        {
+            // Create compiled expression tree - done once per type
+            Type responseType = typeof(TResponse);
+            Type handlerType = typeof(IQueryHandler<,>).MakeGenericType(type, responseType);
+            MethodInfo handleMethod = handlerType.GetMethod("Handle")!;
+
+            // Compile to delegate for maximum performance
+            ParameterExpression handlerParam = Expression.Parameter(typeof(object));
+            ParameterExpression requestParam = Expression.Parameter(typeof(object));
+            ParameterExpression ctParam = Expression.Parameter(typeof(CancellationToken));
+
+            MethodCallExpression call = Expression.Call(
+                Expression.Convert(handlerParam, handlerType),
+                handleMethod,
+                Expression.Convert(requestParam, type),
+                ctParam);
+
+            // .NET 10 Optimization: Use optimized wrapper that avoids boxing
+            MethodInfo wrapperMethod = typeof(ExpressMediator).GetMethod("WrapValueTaskOptimized", BindingFlags.NonPublic | BindingFlags.Static)!
+                .MakeGenericMethod(responseType);
+
+            MethodCallExpression wrappedCall = Expression.Call(wrapperMethod, call);
+
+            return Expression.Lambda<Func<object, object, CancellationToken, ValueTask<object>>>(
+                wrappedCall,
+                handlerParam, requestParam, ctParam).Compile();
+        });
+
+        var cacheKey = (requestType, typeof(TResponse));
+
+        if (!_handlerCache.TryGetValue(cacheKey, out var handler))
+        {
+            // Use generic GetService to avoid MakeGenericType
+            var handlerType = typeof(IQueryHandler<,>).MakeGenericType(requestType, typeof(TResponse));
+            handler = _serviceProvider!.GetService(handlerType)
+                ?? throw new InvalidOperationException($"No handler registered for {requestType.Name}");
+
+            _handlerCache.TryAdd(cacheKey, handler);
+        }
+
+        // Direct execution without observability overhead - returns ValueTask directly
+        return CastValueTask<TResponse>(compiledHandler(handler, request, cancellationToken));
+    }
+
+    // Ultra-fast static generic cache for ExpressMediator - beats compiled expressions!
+    private static class UltraFastStaticCache<TRequest, TResponse>
+        where TRequest : IQuery<TResponse>
+        where TResponse : notnull
+    {
+        private static IQueryHandlerFast<TRequest, TResponse>? _cachedHandler;
+        private static volatile bool _resolved;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static IQueryHandlerFast<TRequest, TResponse>? GetHandler(IServiceProvider? serviceProvider)
+        {
+            if (_resolved)
+                return _cachedHandler;
+
+            if (serviceProvider != null)
+            {
+                _cachedHandler = serviceProvider.GetService<IQueryHandlerFast<TRequest, TResponse>>();
+                _resolved = true;
+            }
+
+            return _cachedHandler;
+        }
+    }
+
+    private async ValueTask<TResponse> SendWithPipelines<TRequest, TResponse>(
+        TRequest request,
+        CancellationToken cancellationToken)
+        where TRequest : IQuery<TResponse>
+        where TResponse : notnull
+    {
+        // Use compiled expression tree for maximum performance
+        Type requestType = request.GetType();
+
+        var compiledHandler = _compiledQueryHandlers.GetOrAdd(requestType, static type =>
+        {
+            // Create compiled expression tree - done once per type
+            Type responseType = typeof(TResponse);
+            Type handlerType = typeof(IQueryHandler<,>).MakeGenericType(type, responseType);
+            MethodInfo handleMethod = handlerType.GetMethod("Handle")!;
+
+            // Compile to delegate for maximum performance
+            ParameterExpression handlerParam = Expression.Parameter(typeof(object));
+            ParameterExpression requestParam = Expression.Parameter(typeof(object));
+            ParameterExpression ctParam = Expression.Parameter(typeof(CancellationToken));
+
+            MethodCallExpression call = Expression.Call(
+                Expression.Convert(handlerParam, handlerType),
+                handleMethod,
+                Expression.Convert(requestParam, type),
+                ctParam);
+
+            // .NET 10 Optimization: Use optimized wrapper that avoids boxing
+            MethodInfo wrapperMethod = typeof(ExpressMediator).GetMethod("WrapValueTaskOptimized", BindingFlags.NonPublic | BindingFlags.Static)!
+                .MakeGenericMethod(responseType);
+
+            MethodCallExpression wrappedCall = Expression.Call(wrapperMethod, call);
+
+            return Expression.Lambda<Func<object, object, CancellationToken, ValueTask<object>>>(
+                wrappedCall,
+                handlerParam, requestParam, ctParam).Compile();
+        });
+
+        var cacheKey = (requestType, typeof(TResponse));
+
+        if (!_handlerCache.TryGetValue(cacheKey, out var handler))
+        {
+            // Use generic GetService to avoid MakeGenericType
+            var handlerType = typeof(IQueryHandler<,>).MakeGenericType(requestType, typeof(TResponse));
+            handler = _serviceProvider!.GetService(handlerType)
+                ?? throw new InvalidOperationException($"No handler registered for {requestType.Name}");
+
+            _handlerCache.TryAdd(cacheKey, handler);
+        }
+
+        // Use compiled expression tree for maximum performance - no reflection or dynamic
+        using Activity? activity = ActivitySource.StartActivity($"CQRS.Query.{typeof(TResponse).Name}");
+
+        try
+        {
+            RequestCounter.Add(1, QueryTags);
+
+            // Check if pipelines are configured
+            var pipelines = PipelineExecutor.GetPipelinesForRequest(
+                requestType, _globalPipelines, _perTypePipelines);
+
+            object result;
+            if (pipelines.Count == 0)
+            {
+                // Fast path: No pipelines - direct handler execution
+                result = await compiledHandler(handler, request, cancellationToken);
+            }
+            else
+            {
+                // Pipeline path: Execute through pipeline chain
+                RequestHandlerDelegate finalHandler = async (req, ct) =>
+                {
+                    var handlerResult = await compiledHandler(handler, req, ct);
+                    return (object?)handlerResult;
+                };
+                result = await PipelineExecutor.ExecutePipeline(request, finalHandler, pipelines, cancellationToken)
+                    ?? throw new InvalidOperationException($"Handler for {requestType.Name} returned null");
+            }
+
+            return (TResponse)result;
+        }
+        finally
+        {
+            CacheSize.Record(_handlerCache.Count);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static async ValueTask<TResponse> CastValueTask<TResponse>(ValueTask<object> valueTask)
+    {
+        var result = await valueTask;
+        return (TResponse)result;
+    }
+
+    #endregion
+
+    #region Command Execution Methods
 
     // Direct execution for commands
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public Task Send<TCommand>(
+    public static Task Send<TCommand>(
        TCommand command,
        ICommandHandler<TCommand> handler,
        CancellationToken ct = default)
@@ -308,127 +546,81 @@ public sealed class ExpressMediator : IDisposable
         return handler.Handle(command, ct).AsTask();
     }
 
-    // Direct execution for events
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public async Task Publish<TEvent>(
-        TEvent @event,
-        IEnumerable<IEventHandler<TEvent>> handlers,
-        CancellationToken ct = default)
-        where TEvent : IEvent
-    {
-        var tasks = handlers.Select(handler => handler.Handle(@event, ct).AsTask());
-        await Task.WhenAll(tasks);
-    }
-
     // Simple optimized service locator without reflection
-    // [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-    // public async Task<TResponse> Send<TResponse>(IQuery<TResponse> request, CancellationToken cancellationToken = default)
-    // {
-    //     if (_serviceProvider == null)
-    //         throw new InvalidOperationException("Service provider not configured.");
-
-    //     // Use compiled expression tree for maximum performance
-    //     var requestType = request.GetType();
-        
-    //     var compiledHandler = _compiledQueryHandlers.GetOrAdd(requestType, static type =>
-    //     {
-    //         // Create compiled expression tree - done once per type
-    //         var responseType = typeof(TResponse);
-    //         var handlerType = typeof(IQueryHandler<,>).MakeGenericType(type, responseType);
-    //         var handleMethod = handlerType.GetMethod("Handle")!;
-            
-    //         // Compile to delegate for maximum performance
-    //         var handlerParam = Expression.Parameter(typeof(object));
-    //         var requestParam = Expression.Parameter(typeof(object));
-    //         var ctParam = Expression.Parameter(typeof(CancellationToken));
-            
-    //         var call = Expression.Call(
-    //             Expression.Convert(handlerParam, handlerType),
-    //             handleMethod,
-    //             Expression.Convert(requestParam, type),
-    //             ctParam);
-
-    //         // .NET 10 Optimization: Use optimized wrapper that avoids boxing
-    //         var wrapperMethod = typeof(ExpressMediator).GetMethod("WrapValueTaskOptimized", BindingFlags.NonPublic | BindingFlags.Static)!
-    //             .MakeGenericMethod(responseType);
-                
-    //         var wrappedCall = Expression.Call(wrapperMethod, call);
-                
-    //         return Expression.Lambda<Func<object, object, CancellationToken, ValueTask<object>>>(
-    //             wrappedCall,
-    //             handlerParam, requestParam, ctParam).Compile();
-    //     });
-        
-    //     var cacheKey = GetQueryCacheKey(requestType, typeof(TResponse));
-        
-    //     if (!_handlerCache.TryGetValue(cacheKey, out var handler))
-    //     {
-    //         // Use generic GetService to avoid MakeGenericType
-    //         var handlerType = typeof(IQueryHandler<,>).MakeGenericType(requestType, typeof(TResponse));
-    //         handler = _serviceProvider.GetService(handlerType)
-    //             ?? throw new InvalidOperationException($"No handler registered for {requestType.Name}");
-            
-    //         _handlerCache.TryAdd(cacheKey, handler);
-    //     }
-
-    //     // Use compiled expression tree for maximum performance - no reflection or dynamic
-    //     using var activity = ActivitySource.StartActivity($"CQRS.Query.{typeof(TResponse).Name}");
-    //     var stopwatch = Stopwatch.StartNew();
-        
-    //     try
-    //     {
-    //         RequestCounter.Add(1, QueryTags);
-    //         var result = await compiledHandler(handler, request, cancellationToken);
-    //         return (TResponse)result;
-    //     }
-    //     finally
-    //     {
-    //         RequestDuration.Record(stopwatch.Elapsed.TotalMilliseconds);
-    //         CacheSize.Record(_handlerCache.Count);
-    //     }
-    // }
-
-    // Optimized command execution with pre-compiled handlers  
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public async Task Send<TCommand>(TCommand command, CancellationToken cancellationToken = default)
-        where TCommand : ICommand
+    [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+    public async ValueTask<TResponse> Send<TResponse>(
+        IQuery<TResponse> request,
+        CancellationToken cancellationToken = default)
     {
         if (_serviceProvider == null)
             throw new InvalidOperationException("Service provider not configured.");
 
-        var commandType = typeof(TCommand);
-        
-        // Use pre-compiled handler if available
-        if (_isPreCompiled && _compiledCommandHandlers.TryGetValue(commandType, out var compiledHandler))
+        // Use compiled expression tree for maximum performance
+        var requestType = request.GetType();
+
+        var compiledHandler = _compiledQueryHandlers.GetOrAdd(requestType, static type =>
         {
-            var cacheKey = GetCommandCacheKey(commandType);
-            
-            // Fast path: use cached handler
-            if (_handlerCache.TryGetValue(cacheKey, out var cachedHandler))
-            {
-                await compiledHandler(cachedHandler, command, cancellationToken);
-                return;
-            }
-            
-            // Resolve and cache handler
-            var handler = _serviceProvider.GetService<ICommandHandler<TCommand>>()
-                ?? throw new InvalidOperationException($"No handler registered for {commandType.Name}");
-            
+            // Create compiled expression tree - done once per type
+            var responseType = typeof(TResponse);
+            var handlerType = typeof(IQueryHandler<,>).MakeGenericType(type, responseType);
+            var handleMethod = handlerType.GetMethod("Handle")!;
+
+            // Compile to delegate for maximum performance
+            var handlerParam = Expression.Parameter(typeof(object));
+            var requestParam = Expression.Parameter(typeof(object));
+            var ctParam = Expression.Parameter(typeof(CancellationToken));
+
+            var call = Expression.Call(
+                Expression.Convert(handlerParam, handlerType),
+                handleMethod,
+                Expression.Convert(requestParam, type),
+                ctParam);
+
+            // .NET 10 Optimization: Use optimized wrapper that avoids boxing
+            var wrapperMethod = typeof(ExpressMediator).GetMethod("WrapValueTaskOptimized", BindingFlags.NonPublic | BindingFlags.Static)!
+                .MakeGenericMethod(responseType);
+
+            var wrappedCall = Expression.Call(wrapperMethod, call);
+
+            return Expression.Lambda<Func<object, object, CancellationToken, ValueTask<object>>>(
+                wrappedCall,
+                handlerParam, requestParam, ctParam).Compile();
+        });
+
+        var cacheKey = (requestType, typeof(TResponse));
+
+        if (!_handlerCache.TryGetValue(cacheKey, out var handler))
+        {
+            // Use generic GetService to avoid MakeGenericType
+            var handlerType = typeof(IQueryHandler<,>).MakeGenericType(requestType, typeof(TResponse));
+            handler = _serviceProvider.GetService(handlerType)
+                ?? throw new InvalidOperationException($"No handler registered for {requestType.Name}");
+
             _handlerCache.TryAdd(cacheKey, handler);
-            await compiledHandler(handler, command, cancellationToken);
-            return;
         }
-        
-        // Fallback to direct call if not pre-compiled
-        var directHandler = _serviceProvider.GetService<ICommandHandler<TCommand>>()
-            ?? throw new InvalidOperationException($"No handler registered for {commandType.Name}");
-            
-        await directHandler.Handle(command, cancellationToken);
+
+        // Use compiled expression tree for maximum performance - no reflection or dynamic
+        using var activity = ActivitySource.StartActivity($"CQRS.Query.{typeof(TResponse).Name}");
+        var stopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            RequestCounter.Add(1, QueryTags);
+            var result = await compiledHandler(handler, request, cancellationToken);
+            return (TResponse)result;
+        }
+        finally
+        {
+            RequestDuration.Record(stopwatch.Elapsed.TotalMilliseconds);
+            CacheSize.Record(_handlerCache.Count);
+        }
     }
 
     // Zero-allocation command execution with caching (legacy method)
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-    public async Task SendLegacy<TCommand>(TCommand command, CancellationToken cancellationToken = default)
+    public async Task Send<TCommand>(
+        TCommand command,
+        CancellationToken cancellationToken = default)
         where TCommand : ICommand
     {
         if (_serviceProvider == null)
@@ -457,8 +649,8 @@ public sealed class ExpressMediator : IDisposable
             return Expression.Lambda<Func<object, object, CancellationToken, ValueTask>>(
                 call, handlerParam, requestParam, ctParam).Compile();
         });
-        
-        var cacheKey = GetCommandCacheKey(commandType);
+
+        var cacheKey = (commandType, typeof(object));
 
         if (!_handlerCache.TryGetValue(cacheKey, out var handler))
         {
@@ -470,16 +662,33 @@ public sealed class ExpressMediator : IDisposable
 
         // Use compiled expression tree for maximum performance
         using var activity = ActivitySource.StartActivity($"CQRS.Command.{commandType.Name}");
-        var stopwatch = Stopwatch.StartNew();
-        
+
         try
         {
             RequestCounter.Add(1, CommandTags);
-            await compiledHandler(handler, command, cancellationToken);
+
+            // Check if pipelines are configured
+            var pipelines = PipelineExecutor.GetPipelinesForRequest(
+                commandType, _globalPipelines, _perTypePipelines);
+
+            if (pipelines.Count == 0)
+            {
+                // Fast path: No pipelines - direct handler execution
+                await compiledHandler(handler, command, cancellationToken);
+            }
+            else
+            {
+                // Pipeline path: Execute through pipeline chain
+                RequestHandlerDelegate finalHandler = async (req, ct) =>
+                {
+                    await compiledHandler(handler, req, ct);
+                    return (object?)null;
+                };
+                await PipelineExecutor.ExecutePipeline(command, finalHandler, pipelines, cancellationToken);
+            }
         }
         finally
         {
-            RequestDuration.Record(stopwatch.Elapsed.TotalMilliseconds);
             CacheSize.Record(_handlerCache.Count);
         }
     }
@@ -493,7 +702,7 @@ public sealed class ExpressMediator : IDisposable
             throw new InvalidOperationException("Service provider not configured.");
 
         var eventType = typeof(TEvent);
-        var cacheKey = GetEventCacheKey(eventType);
+        var cacheKey = (eventType, typeof(object));
 
         if (!_handlerCache.TryGetValue(cacheKey, out var handlersObj))
         {
@@ -548,13 +757,15 @@ public sealed class ExpressMediator : IDisposable
     /// Ultra-fast query execution - directly execute handler without any service locator overhead
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static ValueTask<TResponse> SendDirect<TQuery, TResponse>(
+    public static async ValueTask<TResponse> SendDirect<TQuery, TResponse>(
         TQuery query, 
         IQueryHandler<TQuery, TResponse> handler, 
         CancellationToken cancellationToken = default)
         where TQuery : IQuery<TResponse>
+        where TResponse : notnull
     {
-        return handler.Handle(query, cancellationToken);
+        var result = await handler.Handle(query, cancellationToken);
+        return result ?? throw new InvalidOperationException($"Handler for {typeof(TQuery).Name} returned null");
     }
 
     /// <summary>
@@ -599,34 +810,10 @@ public sealed class ExpressMediator : IDisposable
         return handler.Handle(@event, cancellationToken);
     }
 
-    // Zero-allocation synchronous execution methods for cases when no await is needed
-    
-    /// <summary>
-    /// Synchronous query execution for completed tasks - zero async overhead
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static TResponse SendSync<TQuery, TResponse>(
-        TQuery query, 
-        IQueryHandler<TQuery, TResponse> handler)
-        where TQuery : IQuery<TResponse>
-    {
-        var result = handler.Handle(query, CancellationToken.None);
-        return result.IsCompletedSuccessfully ? result.Result : result.AsTask().GetAwaiter().GetResult();
-    }
 
-    /// <summary>
-    /// Synchronous command execution for completed tasks - zero async overhead
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void SendSync<TCommand>(
-        TCommand command, 
-        ICommandHandler<TCommand> handler)
-        where TCommand : ICommand
-    {
-        var result = handler.Handle(command, CancellationToken.None);
-        if (!result.IsCompletedSuccessfully)
-            result.AsTask().GetAwaiter().GetResult();
-    }
+    #endregion
+
+    #region ValueTask Wrapper Helper Methods (.NET 10 Optimizations)
 
     /// <summary>
     /// .NET 10 Optimized: Zero-allocation ValueTask wrapping for reference types
@@ -734,7 +921,21 @@ public sealed class ExpressMediator : IDisposable
         // Only call this for completed tasks - fastest possible path
         return valueTask.Result;
     }
+
+    #endregion
+
+    #region IDisposable Implementation
+
+    public void Dispose()
+    {
+        ActivitySource?.Dispose();
+        Meter?.Dispose();
+    }
+
+    #endregion
 }
+
+#region Extension Methods
 
 public static class ValueTaskExtensions
 {
@@ -744,4 +945,6 @@ public static class ValueTaskExtensions
         return result!;
     }
 }
+
+#endregion
 

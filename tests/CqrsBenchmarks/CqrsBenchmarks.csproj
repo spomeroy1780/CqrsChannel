@@ -3,7 +3,7 @@
     <ProjectReference Include="../../src/CqrsExpress/CqrsExpress.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="BenchmarkDotNet" Version="0.15.3" />
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.4" />
     <PackageReference Include="MediatR.Extensions.Microsoft.DependencyInjection" Version="11.1.0" />
     <PackageReference Include="MessagePipe" Version="1.8.1" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.9" />
